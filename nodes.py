@@ -432,17 +432,150 @@ class ZipCompress:
         return (os.path.abspath(zip_path),)
 
 
+class SendToWebhook:
+    """
+    A ComfyUI node for sending JSON data to an external webhook/API.
+    Useful for integrating with external services in API mode.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "webhook_url": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": "https://your-service.com/webhook"
+                }),
+            },
+            "optional": {
+                "timestamps": ("LIST",),
+                "timestamps_string": ("STRING", {"forceInput": True}),
+                "custom_data": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "placeholder": "Additional JSON data (optional)"
+                }),
+                "headers": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                    "placeholder": "Custom headers as JSON, e.g. {\"Authorization\": \"Bearer token\"}"
+                }),
+                "timeout": ("INT", {
+                    "default": 30,
+                    "min": 1,
+                    "max": 300,
+                    "step": 1,
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "INT", "BOOLEAN")
+    RETURN_NAMES = ("response_body", "status_code", "success")
+    FUNCTION = "send_to_webhook"
+    CATEGORY = "MiaoshouAI Video Segmentation"
+
+    def send_to_webhook(
+        self,
+        webhook_url,
+        timestamps=None,
+        timestamps_string=None,
+        custom_data="",
+        headers="",
+        timeout=30
+    ):
+        import json
+        import urllib.request
+        import urllib.error
+
+        if not webhook_url or not webhook_url.strip():
+            raise ValueError("webhook_url is required")
+
+        # Build payload
+        payload = {}
+
+        # Add timestamps if provided
+        if timestamps is not None:
+            payload["timestamps"] = [
+                {"start": start, "end": end} for start, end in timestamps
+            ]
+            payload["scene_count"] = len(timestamps)
+
+        # Add timestamps string if provided
+        if timestamps_string:
+            payload["timestamps_string"] = timestamps_string
+
+        # Parse and merge custom data if provided
+        if custom_data and custom_data.strip():
+            try:
+                custom_json = json.loads(custom_data)
+                if isinstance(custom_json, dict):
+                    payload.update(custom_json)
+                else:
+                    payload["custom_data"] = custom_json
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in custom_data: {e}")
+
+        # Parse headers if provided
+        request_headers = {"Content-Type": "application/json"}
+        if headers and headers.strip():
+            try:
+                custom_headers = json.loads(headers)
+                if isinstance(custom_headers, dict):
+                    request_headers.update(custom_headers)
+                else:
+                    raise ValueError("headers must be a JSON object")
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in headers: {e}")
+
+        # Encode payload
+        payload_bytes = json.dumps(payload).encode("utf-8")
+
+        logger.info(f"Sending webhook to: {webhook_url}")
+        logger.info(f"Payload: {json.dumps(payload, indent=2)}")
+
+        # Create and send request
+        request = urllib.request.Request(
+            webhook_url,
+            data=payload_bytes,
+            headers=request_headers,
+            method="POST"
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status_code = response.getcode()
+                response_body = response.read().decode("utf-8")
+                logger.info(f"Webhook response: {status_code} - {response_body[:200]}")
+                return (response_body, status_code, True)
+
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode("utf-8") if e.fp else str(e)
+            logger.error(f"Webhook HTTP error: {e.code} - {error_body}")
+            raise RuntimeError(f"Webhook failed with HTTP {e.code}: {error_body}")
+
+        except urllib.error.URLError as e:
+            logger.error(f"Webhook URL error: {e.reason}")
+            raise RuntimeError(f"Webhook failed: {e.reason}")
+
+        except TimeoutError:
+            logger.error(f"Webhook timeout after {timeout}s")
+            raise RuntimeError(f"Webhook timeout after {timeout} seconds")
+
+
 # Node mappings for ComfyUI - keeping original MiaoshouAI names
 NODE_CLASS_MAPPINGS = {
     "DownloadAndLoadTransNetModel": DownloadAndLoadTransNetModel,
     "TransNetV2_Run": TransNetV2_Run,
     "SelectVideo": SelectVideo,
-    "ZipCompress": ZipCompress
+    "ZipCompress": ZipCompress,
+    "SendToWebhook": SendToWebhook,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "DownloadAndLoadTransNetModel": "🐾MiaoshouAI Load TransNet Model",
     "TransNetV2_Run": "🐾MiaoshouAI Segment Video",
     "SelectVideo": "🐾MiaoshouAI Select Video",
-    "ZipCompress": "🐾MiaoshouAI Zip Compress"
+    "ZipCompress": "🐾MiaoshouAI Zip Compress",
+    "SendToWebhook": "🐾MiaoshouAI Send to Webhook",
 }
