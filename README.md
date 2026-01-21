@@ -1,24 +1,31 @@
 # ComfyUI Video Segmentation Node
 
-A ComfyUI custom node for automatic video scene segmentation using TransNetV2.
+A ComfyUI custom node for automatic video scene detection using TransNetV2.
 
 ## Description
 
-This node segments videos into individual scenes automatically using the TransNetV2 deep learning model. TransNetV2 is a state-of-the-art neural network for shot boundary detection in videos.
+This node detects scene boundaries in videos using the TransNetV2 deep learning model and returns timestamps for each detected scene. TransNetV2 is a state-of-the-art neural network for shot boundary detection in videos.
 
 ## Features
 
-- Automatic scene detection and segmentation
-- Uses TransNetV2 for accurate shot boundary detection
-- Fallback to OpenCV-based scene detection when TransNetV2 is unavailable
+- Automatic scene detection using TransNetV2
+- Returns timestamps (start/end times) for each detected scene
+- Model weights auto-download from Hugging Face
 - Configurable scene detection parameters
-- Outputs individual video segments
+- Temp file cleanup to avoid memory bloat
 
 ## Installation
 
-1. Clone or download this repository to your ComfyUI custom_nodes directory:
+1. Clone this repository with submodules to your ComfyUI custom_nodes directory:
+   ```bash
+   cd /path/to/ComfyUI/custom_nodes
+   git clone --recursive https://github.com/YOUR_USERNAME/ComfyUI-Video-Segmentation.git
    ```
-   D:\ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI-Video-Segmentation\
+
+   If you already cloned without `--recursive`, initialize the submodule:
+   ```bash
+   cd ComfyUI-Video-Segmentation
+   git submodule update --init --recursive
    ```
 
 2. Install required dependencies:
@@ -26,99 +33,83 @@ This node segments videos into individual scenes automatically using the TransNe
    pip install -r requirements.txt
    ```
 
-3. Install FFmpeg (required for video processing):
-   - **Windows**: Download from [https://ffmpeg.org/download.html](https://ffmpeg.org/download.html)
-   - **Linux**: `sudo apt-get install ffmpeg`
-   - **macOS**: `brew install ffmpeg`
+3. Restart ComfyUI
 
-4. Download TransNetV2 model weights (for best performance):
-   - Download the `transnetv2-weights` directory from [TransNetV2 repository](https://github.com/soCzech/TransNetV2/tree/master/inference/transnetv2-weights)
-   - Place it in the node directory or your preferred model directory
+The TransNetV2 model weights will be automatically downloaded from Hugging Face on first use.
 
-5. Alternative TransNetV2 installation:
-   ```bash
-   pip install transnetv2
-   ```
+## Nodes
 
-6. Restart ComfyUI
+### 🐾MiaoshouAI Segment Video (TransNetV2_Run)
 
-## Usage
+Detects scene boundaries in a video and returns timestamps.
 
-### Inputs
-
-- **video**: Path to the input video file (STRING)
-- **output_dir**: Directory where segmented videos will be saved (STRING)
+**Inputs:**
+- **video**: Video input (VIDEO type)
+- **threshold**: Scene detection threshold (FLOAT, default: 0.5) - lower values detect more scene changes
 - **min_scene_length**: Minimum scene length in frames (INT, default: 30)
-- **threshold**: Scene detection threshold (FLOAT, default: 0.5)
+- **device**: Processing device - auto, cpu, or cuda (default: auto)
+- **TransNet_model** (optional): Pre-loaded model from Load TransNet Model node
 
-### Outputs
+**Outputs:**
+- **timestamps**: List of (start_time, end_time) tuples in seconds
+- **timestamps_string**: String representation of timestamps (one per line)
 
-- **output_directory**: Path to the directory containing segmented videos (STRING)
-- **num_segments**: Number of video segments created (INT)
-- **segment_paths**: List of paths to individual segment files (LIST)
+### 🐾MiaoshouAI Select Video (SelectVideo)
 
-### Example Workflow
+Selects a specific scene timestamp from the detected scenes.
 
-1. Add the "Video Segmentation" node to your ComfyUI workflow
-2. Set the input video path
-3. Specify the output directory (optional - defaults to ComfyUI output directory)
-4. Adjust min_scene_length and threshold as needed
-5. Run the workflow
+**Inputs:**
+- **timestamps**: List of timestamps from Segment Video node
+- **index**: Index of the scene to select (INT, default: 0)
+
+**Outputs:**
+- **start_time**: Start time in seconds (FLOAT)
+- **end_time**: End time in seconds (FLOAT)
+- **timestamp_string**: String representation of the selected timestamp
+
+### 🐾MiaoshouAI Load TransNet Model (DownloadAndLoadTransNetModel)
+
+Optional node for pre-loading the TransNetV2 model. The Segment Video node loads the model automatically if not provided.
+
+**Inputs:**
+- **model**: Model selection (currently only "transnetv2-pytorch-weights")
+- **device**: Processing device - auto, cpu, or cuda
+
+**Outputs:**
+- **TransNet_model**: Loaded model to pass to Segment Video node
+
+### 🐾MiaoshouAI Zip Compress (ZipCompress)
+
+Utility node for compressing files into a zip archive.
+
+## Example Workflow
+
+1. Add a video input node
+2. Add "🐾MiaoshouAI Segment Video" node
+3. Connect video to the Segment Video node
+4. Optionally add "🐾MiaoshouAI Select Video" to extract specific scene timestamps
+5. Use the timestamps in downstream nodes for video processing
 
 ## Dependencies
 
-### Required
 - ComfyUI
 - Python 3.8+
 - PyTorch
 - NumPy
-- PIL (Pillow)
-
-### Optional (for better performance)
-- TransNetV2: `pip install transnetv2`
-- OpenCV: `pip install opencv-python` (used as fallback)
-- FFmpeg (for video segment creation)
-
-## Technical Details
-
-### TransNetV2 Integration
-
-The node first attempts to use TransNetV2 for scene detection. TransNetV2 is a neural network specifically designed for shot boundary detection and provides superior accuracy compared to traditional methods.
-
-### Fallback Method
-
-If TransNetV2 is not available, the node falls back to an OpenCV-based scene detection algorithm that:
-1. Analyzes frame-to-frame differences
-2. Identifies sudden changes in visual content
-3. Segments the video based on detected boundaries
-
-### Output Format
-
-- Segmented videos are saved as MP4 files
-- Files are named sequentially: `segment_000.mp4`, `segment_001.mp4`, etc.
-- Original video quality and codec are preserved when possible
+- Pillow
+- OpenCV
+- huggingface_hub (for model auto-download)
 
 ## Configuration
 
 ### Scene Detection Parameters
 
-- **min_scene_length**: Controls the minimum duration of detected scenes. Shorter scenes are merged with adjacent ones.
-- **threshold**: Controls the sensitivity of scene detection. Lower values detect more scene changes, higher values are more conservative.
+- **threshold**: Controls sensitivity of scene detection. Lower values (e.g., 0.3) detect more scene changes, higher values (e.g., 0.7) are more conservative.
+- **min_scene_length**: Minimum duration of detected scenes in frames. Shorter scenes are merged with adjacent ones.
 
-## Troubleshooting
+## Model Storage
 
-### TransNetV2 Not Found
-If you see errors about TransNetV2 not being found:
-1. Install TransNetV2: `pip install transnetv2`
-2. Or ensure the TransNetV2 source code is available in your project
-
-### FFmpeg Not Found
-For video segmentation, FFmpeg is required:
-1. Install FFmpeg and ensure it's in your system PATH
-2. Or install via conda: `conda install ffmpeg`
-
-### Permission Errors
-Ensure the output directory is writable and you have sufficient disk space for the segmented videos.
+Model weights are stored in: `ComfyUI/models/VLM/transnetv2-pytorch-weights/`
 
 ## References
 

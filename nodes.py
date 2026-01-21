@@ -3,8 +3,6 @@ import uuid
 import folder_paths
 import numpy as np
 import logging
-import subprocess
-from typing import List, Tuple
 from pathlib import Path
 
 import torch
@@ -18,20 +16,71 @@ try:
     from comfy_api.input import VideoInput
 except ImportError:
     VideoInput = None
-    logger.warning("ComfyUI API not available, using fallback video handling")
+    logger.info("ComfyUI API VideoInput not available, will accept string paths only")
 
-# Model directory setup - same as Qwen2.5-VL
+# Model directory setup
 model_directory = os.path.join(folder_paths.models_dir, "VLM")
 os.makedirs(model_directory, exist_ok=True)
+
+# Global model cache to avoid reloading
+_model_cache = {}
+
+
+def _load_transnet_model(device):
+    """Load TransNetV2 model, using cache if available."""
+    import transnetv2_pytorch
+
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    cache_key = device
+    if cache_key in _model_cache:
+        logger.info(f"Using cached TransNetV2 model on {device}")
+        return _model_cache[cache_key]
+
+    model_name = "transnetv2-pytorch-weights"
+    model_path = os.path.join(model_directory, model_name)
+    pytorch_weights_path = os.path.join(model_path, "transnetv2-pytorch-weights.pth")
+
+    # Download if not exists
+    if not os.path.exists(pytorch_weights_path):
+        os.makedirs(model_path, exist_ok=True)
+        from huggingface_hub import hf_hub_download
+
+        print("Downloading TransNetV2 model from Hugging Face...")
+        hf_hub_download(
+            repo_id="MiaoshouAI/transnetv2-pytorch-weights",
+            filename="transnetv2-pytorch-weights.pth",
+            local_dir=model_path,
+            local_dir_use_symlinks=False
+        )
+        logger.info(f"Downloaded TransNetV2 weights to {model_path}")
+
+    # Load model
+    model_instance = transnetv2_pytorch.TransNetV2()
+    model_instance.load_state_dict(torch.load(pytorch_weights_path, map_location=device))
+    model_instance = model_instance.to(device)
+    model_instance.eval()
+
+    transnet_model = {
+        "model": model_instance,
+        "model_path": model_path,
+        "device": device,
+    }
+
+    _model_cache[cache_key] = transnet_model
+    logger.info(f"TransNetV2 model loaded on {device}")
+
+    return transnet_model
 
 
 class DownloadAndLoadTransNetModel:
     """
     A ComfyUI node for downloading and loading TransNetV2 models.
     Automatically downloads from Hugging Face (MiaoshouAI/transnetv2-pytorch-weights) if not found locally.
-    Following the Qwen2.5-VL structure for consistency.
+    Note: TransNetV2_Run now loads the model automatically, so this node is optional.
     """
-    
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -40,7 +89,7 @@ class DownloadAndLoadTransNetModel:
                     [
                         "transnetv2-pytorch-weights",
                     ],
-                    {"default": "transnetv2-weights"},
+                    {"default": "transnetv2-pytorch-weights"},
                 ),
                 "device": (
                     ["auto", "cpu", "cuda"],
@@ -55,129 +104,25 @@ class DownloadAndLoadTransNetModel:
     CATEGORY = "MiaoshouAI Video Segmentation"
 
     def DownloadAndLoadTransNetModel(self, model, device):
-        TransNet_model = {"model": "", "model_path": ""}
-        model_name = model
-        model_path = os.path.join(model_directory, model_name)
-
-        if not os.path.exists(model_path):
-            print(f"Downloading TransNetV2 model to: {model_path}")
-            self._download_model(model_name, model_path)
-
-        # Load TransNetV2 model
-        try:
-            import transnetv2_pytorch as transnetv2
-            
-            # Initialize the model
-            if device == "auto":
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-            
-            # Path to pre-converted PyTorch weights
-            pytorch_weights_path = os.path.join(model_path, "transnetv2-pytorch-weights.pth")
-            
-            # Load the model with pre-converted PyTorch weights
-            model_instance = transnetv2.TransNetV2()
-            
-            # Load the converted weights
-            if os.path.exists(pytorch_weights_path):
-                model_instance.load_state_dict(torch.load(pytorch_weights_path, map_location=device))
-                logger.info(f"Loaded pre-converted PyTorch weights from {pytorch_weights_path}")
-            else:
-                logger.error(f"Pre-converted PyTorch weights not found at {pytorch_weights_path}")
-                logger.error("Please run the weight conversion script first")
-                raise FileNotFoundError(f"PyTorch weights not found: {pytorch_weights_path}")
-            
-            # Move model to device
-            model_instance = model_instance.to(device)
-            model_instance.eval()
-            
-            TransNet_model["model"] = model_instance
-            TransNet_model["model_path"] = model_path
-            TransNet_model["device"] = device
-            
-            logger.info(f"TransNetV2 model loaded successfully from {model_path}")
-            
-        except ImportError:
-            logger.error("TransNetV2 package not found. Please install: pip install transnetv2-pytorch")
-            raise ImportError("TransNetV2 package not installed")
-        except Exception as e:
-            logger.error(f"Error loading TransNetV2 model: {str(e)}")
-            raise
-
-        return (TransNet_model,)
-
-    def _download_model(self, model_name, model_path):
-        """
-        Download TransNetV2 model from Hugging Face if not found locally.
-        """
-        try:
-            os.makedirs(model_path, exist_ok=True)
-            
-            # Try to import huggingface_hub for downloading
-            try:
-                from huggingface_hub import hf_hub_download
-                
-                print(f"Downloading TransNetV2 model from Hugging Face...")
-                
-                # Download the PyTorch weights file
-                weights_file = hf_hub_download(
-                    repo_id="MiaoshouAI/transnetv2-pytorch-weights",
-                    filename="transnetv2-pytorch-weights.pth",
-                    local_dir=model_path,
-                    local_dir_use_symlinks=False
-                )
-                
-                logger.info(f"Successfully downloaded TransNetV2 weights to {weights_file}")
-                
-                # Create a marker file to indicate successful download
-                marker_file = os.path.join(model_path, "model_ready.txt")
-                with open(marker_file, "w") as f:
-                    f.write(f"TransNetV2 model {model_name} downloaded successfully\n")
-                    f.write(f"Downloaded from: MiaoshouAI/transnetv2-pytorch-weights\n")
-                    f.write(f"Weights file: transnetv2-pytorch-weights.pth\n")
-                
-            except ImportError:
-                logger.error("huggingface_hub not found. Please install: pip install huggingface_hub")
-                logger.info("Alternatively, manually download transnetv2-pytorch-weights.pth from:")
-                logger.info("https://huggingface.co/MiaoshouAI/transnetv2-pytorch-weights")
-                logger.info(f"And place it in: {model_path}")
-                
-                # Create a marker file with manual download instructions
-                marker_file = os.path.join(model_path, "model_ready.txt")
-                with open(marker_file, "w") as f:
-                    f.write(f"TransNetV2 model directory {model_name} ready\n")
-                    f.write("Manual download required - huggingface_hub not available\n")
-                    f.write("Download transnetv2-pytorch-weights.pth from:\n")
-                    f.write("https://huggingface.co/MiaoshouAI/transnetv2-pytorch-weights\n")
-                    f.write(f"And place it in: {model_path}\n")
-                
-                raise ImportError("huggingface_hub required for automatic download")
-            
-            except Exception as e:
-                logger.error(f"Error downloading from Hugging Face: {str(e)}")
-                logger.info("You can manually download the model from:")
-                logger.info("https://huggingface.co/MiaoshouAI/transnetv2-pytorch-weights")
-                logger.info(f"And place transnetv2-pytorch-weights.pth in: {model_path}")
-                raise
-            
-        except Exception as e:
-            logger.error(f"Error preparing model directory: {str(e)}")
-            raise
+        # model parameter kept for interface compatibility (only one model available)
+        _ = model
+        return (_load_transnet_model(device),)
 
 
 class TransNetV2_Run:
     """
-    A ComfyUI node for video scene segmentation using TransNetV2.
-    Following the Qwen2.5-VL structure with optional video input.
+    A ComfyUI node for video scene detection using TransNetV2.
+    Automatically loads model if not provided. Returns timestamps for detected scene boundaries.
     """
-    
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "optional": {
-                "video": ("VIDEO",),
+                "TransNet_model": ("TRANSNET_MODEL",),
             },
             "required": {
-                "TransNet_model": ("TRANSNET_MODEL",),
+                "video": ("VIDEO",),
                 "threshold": ("FLOAT", {
                     "default": 0.5,
                     "min": 0.1,
@@ -192,332 +137,196 @@ class TransNetV2_Run:
                     "step": 1,
                     "display": "number"
                 }),
-                "output_dir": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "placeholder": "Leave empty for default temp directory"
-                }),
+                "device": (
+                    ["auto", "cpu", "cuda"],
+                    {"default": "auto"},
+                ),
             },
         }
 
     RETURN_TYPES = ("LIST", "STRING")
-    RETURN_NAMES = ("segment_paths", "path_string")
+    RETURN_NAMES = ("timestamps", "timestamps_string")
     FUNCTION = "TransNetV2_Run"
     CATEGORY = "MiaoshouAI Video Segmentation"
 
-    def TransNetV2_Run(
-        self,
-        TransNet_model,
-        threshold,
-        min_scene_length,
-        output_dir,
-        video=None,
-    ):
-        if video is None:
-            logger.error("No video input provided")
-            return ([], "")
-        
+    def TransNetV2_Run(self, video, threshold, min_scene_length, device, TransNet_model=None):
+        # Load model if not provided (auto-load with caching)
+        if TransNet_model is None:
+            TransNet_model = _load_transnet_model(device)
+
         # Handle video input - convert to temporary file if needed
-        video_path = self._handle_video_input(video)
-        if not video_path:
-            logger.error("Failed to process video input")
-            return ([], "")
-        
-        # Set up output directory
-        if not output_dir:
-            # Generate unique directory name using UUID
-            import uuid
-            unique_id = uuid.uuid4().hex[:8]  # Use first 8 chars for shorter name
-            output_dir = os.path.join(folder_paths.temp_directory, f"transnet_segments_{unique_id}")
-        
-        os.makedirs(output_dir, exist_ok=True)
-        
+        video_path, is_temp_file = self._handle_video_input(video)
+
         try:
-            # Run TransNetV2 segmentation directly
-            segment_paths = self._run_transnetv2_direct(
+            # Run TransNetV2 scene detection
+            timestamps = self._run_transnetv2(
                 TransNet_model,
                 video_path,
-                output_dir,
                 threshold,
                 min_scene_length
             )
-            
-            # Convert segment paths list to string format
-            path_string = "\n".join(segment_paths) if segment_paths else ""
-            
-            logger.info(f"Successfully created {len(segment_paths)} video segments")
-            return (segment_paths, path_string)
-            
-        except Exception as e:
-            logger.error(f"Error in TransNetV2 segmentation: {str(e)}")
-            return ([], "")
-    
-    def _handle_video_input(self, video):
-        """
-        Handle VIDEO input type and convert to file path.
-        Based on Qwen2.5-VL temp_video function.
-        """
-        try:
-            if VideoInput and isinstance(video, VideoInput):
-                unique_id = uuid.uuid4().hex
-                video_path = (
-                    Path(folder_paths.temp_directory) / f"temp_video_{unique_id}.mp4"
-                )
-                video_path.parent.mkdir(parents=True, exist_ok=True)
-                video.save_to(
-                    str(video_path),
-                    format="mp4",
-                    codec="h264",
-                )
-                
-                logger.info(f"Video saved to temporary path: {video_path}")
-                return str(video_path)
-            
-            elif isinstance(video, str):
-                if os.path.isfile(video):
-                    return video
-                else:
-                    logger.error(f"Video file not found: {video}")
-                    return None
-            
-            else:
-                logger.warning(f"Unsupported video input type: {type(video)}")
-                return None
-                    
-        except Exception as e:
-            logger.error(f"Error handling video input: {str(e)}")
-            return None
 
-    def _run_transnetv2_direct(self, TransNet_model, video_path, output_dir, threshold, min_scene_length):
-        """
-        Run TransNetV2 segmentation directly using the loaded model.
-        """
-        try:
-            import transnetv2_pytorch as transnetv2
-            import cv2
-            
-            model = TransNet_model["model"]
-            
-            # Load video
-            cap = cv2.VideoCapture(video_path)
-            if not cap.isOpened():
-                raise RuntimeError(f"Cannot open video file: {video_path}")
-            
-            # Get video properties
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            
-            logger.info(f"Video properties: {total_frames} frames, {fps} fps, {width}x{height}")
-            
-            # Read all frames
-            frames = []
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                # Convert BGR to RGB
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(frame_rgb)
-            
-            cap.release()
-            
-            if not frames:
-                raise RuntimeError("No frames could be read from video")
-            
-            # Convert to numpy array
-            frames_array = np.array(frames)
-            
-            # Run TransNetV2 prediction
-            logger.info("Running TransNetV2 scene detection...")
-            
-            # Convert frames to tensor format - TransNetV2 expects uint8 [B, T, H, W, 3]
-            # According to source: assert inputs.dtype == torch.uint8 and shape[2:] == [27, 48, 3]
-            import torch.nn.functional as F
-            from PIL import Image
-            
-            resized_frames = []
-            for frame in frames_array:
-                # Use PIL for resizing to maintain uint8 format
-                pil_image = Image.fromarray(frame.astype(np.uint8))
-                # Resize to 48x27 (width x height for PIL)
-                resized_pil = pil_image.resize((48, 27), Image.BILINEAR)
-                # Convert back to numpy array (uint8, HWC format)
-                resized_frame = np.array(resized_pil, dtype=np.uint8)
-                resized_frames.append(resized_frame)
-            
-            # Stack frames: (T, H, W, C) then add batch dim: (1, T, H, W, C)
-            frames_array_resized = np.stack(resized_frames, axis=0)
-            frames_array_batch = frames_array_resized[np.newaxis, ...]  # Add batch dimension
-            
-            # Convert to uint8 tensor (TransNetV2 requirement)
-            frames_tensor = torch.from_numpy(frames_array_batch).to(dtype=torch.uint8)
-            
-            # Move to device
-            frames_tensor = frames_tensor.to(TransNet_model["device"])
-            
-            logger.info(f"Input tensor shape: {frames_tensor.shape} (dtype: {frames_tensor.dtype})")
-            
-            # Run inference
-            with torch.no_grad():
-                predictions = model(frames_tensor)
-                
-                # Handle TransNetV2 output format
-                if isinstance(predictions, tuple):
-                    # Model returns (one_hot, {"many_hot": many_hot_predictions})
-                    one_hot_predictions, many_hot_dict = predictions
-                    logger.info(f"One-hot predictions shape: {one_hot_predictions.shape}")
-                    logger.info(f"Many-hot predictions available: {list(many_hot_dict.keys())}")
-                    single_frame_predictions = one_hot_predictions
-                else:
-                    # Model returns only one_hot predictions
-                    logger.info(f"Predictions shape: {predictions.shape}")
-                    single_frame_predictions = predictions
-                
-            # Convert predictions to numpy
-            single_frame_predictions = single_frame_predictions.cpu().numpy().squeeze()
-            all_frame_predictions = single_frame_predictions  # For compatibility
-            
-            # Find scene boundaries
-            scenes = self._find_scenes(single_frame_predictions, threshold, min_scene_length)
-            
-            # Create video segments
-            segment_paths = self._create_video_segments(
-                video_path, scenes, output_dir, fps
+            # Convert timestamps list to string format (start-end per line)
+            timestamps_string = "\n".join(
+                f"{start:.3f}-{end:.3f}" for start, end in timestamps
             )
-            
-            return segment_paths
-            
-        except Exception as e:
-            logger.error(f"Error running TransNetV2 directly: {str(e)}")
-            raise
+
+            logger.info(f"Successfully detected {len(timestamps)} scenes")
+            return (timestamps, timestamps_string)
+
+        finally:
+            # Clean up temp file if we created one
+            if is_temp_file and os.path.exists(video_path):
+                os.remove(video_path)
+                logger.info(f"Cleaned up temporary file: {video_path}")
+
+    def _handle_video_input(self, video):
+        """Handle VIDEO input type and convert to file path."""
+        if VideoInput and isinstance(video, VideoInput):
+            unique_id = uuid.uuid4().hex
+            video_path = (
+                Path(folder_paths.temp_directory) / f"temp_video_{unique_id}.mp4"
+            )
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+            video.save_to(
+                str(video_path),
+                format="mp4",
+                codec="h264",
+            )
+            logger.info(f"Video saved to temporary path: {video_path}")
+            return str(video_path), True
+
+        elif isinstance(video, str):
+            if os.path.isfile(video):
+                return video, False
+            else:
+                raise FileNotFoundError(f"Video file not found: {video}")
+
+        else:
+            raise TypeError(f"Unsupported video input type: {type(video)}. Expected VideoInput or string path.")
+
+    def _run_transnetv2(self, transnet_model, video_path, threshold, min_scene_length):
+        """Run TransNetV2 scene detection and return timestamps."""
+        import cv2
+
+        model = transnet_model["model"]
+
+        # Load video
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video file: {video_path}")
+
+        # Get video properties
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        logger.info(f"Video properties: {total_frames} frames, {fps} fps, {width}x{height}")
+
+        # Read all frames
+        frames = []
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame_rgb)
+
+        cap.release()
+
+        if not frames:
+            raise RuntimeError("No frames could be read from video")
+
+        frames_array = np.array(frames)
+
+        logger.info("Running TransNetV2 scene detection...")
+
+        # Resize frames to TransNetV2 expected size (48x27)
+        resized_frames = []
+        for frame in frames_array:
+            pil_image = Image.fromarray(frame.astype(np.uint8))
+            resized_pil = pil_image.resize((48, 27), Image.Resampling.BILINEAR)
+            resized_frame = np.array(resized_pil, dtype=np.uint8)
+            resized_frames.append(resized_frame)
+
+        # Stack frames: (T, H, W, C) then add batch dim: (1, T, H, W, C)
+        frames_array_resized = np.stack(resized_frames, axis=0)
+        frames_array_batch = frames_array_resized[np.newaxis, ...]
+
+        # Convert to uint8 tensor and move to device
+        frames_tensor = torch.from_numpy(frames_array_batch).to(dtype=torch.uint8)
+        frames_tensor = frames_tensor.to(transnet_model["device"])
+
+        logger.info(f"Input tensor shape: {frames_tensor.shape}")
+
+        # Run inference
+        with torch.no_grad():
+            predictions = model(frames_tensor)
+
+            if isinstance(predictions, tuple):
+                one_hot_predictions, _ = predictions
+                single_frame_predictions = one_hot_predictions
+            else:
+                single_frame_predictions = predictions
+
+        single_frame_predictions = single_frame_predictions.cpu().numpy().squeeze()
+
+        # Find scene boundaries
+        scenes = self._find_scenes(single_frame_predictions, threshold, min_scene_length)
+
+        # Convert frame indices to timestamps
+        timestamps = [(start_frame / fps, end_frame / fps) for start_frame, end_frame in scenes]
+
+        logger.info(f"Detected {len(timestamps)} scenes")
+        for i, (start, end) in enumerate(timestamps):
+            logger.info(f"  Scene {i+1}: {start:.3f}s - {end:.3f}s")
+
+        return timestamps
 
     def _find_scenes(self, predictions, threshold, min_scene_length):
-        """
-        Find scene boundaries from TransNetV2 predictions.
-        Uses the same algorithm as the reference project's predictions_to_scenes function.
-        """
-        # Convert predictions to binary (same as reference project)
+        """Find scene boundaries from TransNetV2 predictions."""
         predictions_binary = (predictions > threshold).astype(np.uint8)
-        
+
         scenes = []
         t, t_prev, start = -1, 0, 0
-        
+
         for i, t in enumerate(predictions_binary):
-            if t_prev == 1 and t == 0:  # Transition from scene boundary to normal frame - start of new scene
+            if t_prev == 1 and t == 0:
                 start = i
-            if t_prev == 0 and t == 1 and i != 0:  # Transition from normal frame to scene boundary - end of scene
+            if t_prev == 0 and t == 1 and i != 0:
                 scenes.append([start, i])
             t_prev = t
-            
-        # Handle the last scene
-        if t == 0:  # If last prediction is not a scene boundary
+
+        if t == 0:
             scenes.append([start, len(predictions_binary)])
-        
-        # Handle case where all predictions are scene boundaries
+
         if len(scenes) == 0:
             return [(0, len(predictions_binary))]
-        
+
         # Apply minimum scene length filtering
         filtered_scenes = []
         for start, end in scenes:
             if end - start >= min_scene_length:
                 filtered_scenes.append((start, end))
             else:
-                # If scene is too short, merge with previous scene or extend
                 if filtered_scenes:
-                    # Extend the previous scene to include this short one
-                    prev_start, prev_end = filtered_scenes[-1]
+                    prev_start, _ = filtered_scenes[-1]
                     filtered_scenes[-1] = (prev_start, end)
                 else:
-                    # If it's the first scene and too short, keep it anyway
                     filtered_scenes.append((start, end))
-        
-        return filtered_scenes if filtered_scenes else [(0, len(predictions_binary))]
 
-    def _create_video_segments(self, video_path, scenes, output_dir, fps):
-        """
-        Create video segments based on scene boundaries using ffmpeg subprocess to preserve audio.
-        """
-        import subprocess
-        
-        segment_paths = []
-        
-        try:
-            for i, (start_frame, end_frame) in enumerate(scenes):
-                # Create output filename
-                segment_filename = f"segment_{i+1:03d}.mp4"
-                segment_path = os.path.join(output_dir, segment_filename)
-                
-                # Calculate time-based start and end times
-                # Note: end_time is exclusive in both moviepy and ffmpeg -to parameter
-                start_time = start_frame / fps
-                end_time = end_frame / fps  # ffmpeg -to parameter is exclusive, matching moviepy's subclip behavior
-                
-                logger.info(f"Creating segment {i+1}: frames {start_frame}-{end_frame-1} (inclusive), time {start_time:.2f}s-{end_time:.2f}s")
-                
-                # Use ffmpeg subprocess to extract segment with audio preservation
-                try:
-                    ffmpeg_cmd = [
-                        'ffmpeg',
-                        '-y',  # Overwrite output files
-                        '-ss', str(start_time),  # Start time
-                        '-to', str(end_time),    # End time (exclusive)
-                        '-i', video_path,        # Input file
-                        '-c:v', 'libx264',       # Video codec
-                        '-c:a', 'aac',           # Audio codec
-                        '-preset', 'fast',       # Encoding speed
-                        '-crf', '23',            # Quality (lower = better)
-                        segment_path             # Output file
-                    ]
-                    
-                    # Run ffmpeg command
-                    result = subprocess.run(
-                        ffmpeg_cmd,
-                        capture_output=True,
-                        text=True,
-                        check=False  # Don't raise exception on non-zero exit
-                    )
-                    
-                    # Check if command succeeded and file exists
-                    if result.returncode == 0 and os.path.exists(segment_path):
-                        # Get absolute path
-                        abs_segment_path = os.path.abspath(segment_path)
-                        segment_paths.append(abs_segment_path)
-                        
-                        logger.info(f"✅ Created segment {i+1}: {abs_segment_path} (duration: {end_time - start_time:.2f}s)")
-                    else:
-                        logger.error(f"❌ Failed to create segment {i+1}:")
-                        logger.error(f"   Return code: {result.returncode}")
-                        logger.error(f"   Error: {result.stderr}")
-                        continue
-                    
-                except Exception as e:
-                    logger.error(f"❌ Failed to create segment {i+1}: {str(e)}")
-                    # Continue with next segment even if one fails
-                    continue
-        
-        except Exception as e:
-            logger.error(f"Error in video segmentation: {str(e)}")
-            raise
-        
-        return segment_paths
+        return filtered_scenes if filtered_scenes else [(0, len(predictions_binary))]
 
 
 class SelectVideo:
-    """
-    A ComfyUI node for selecting a specific video segment from TransNetV2 output.
-    Takes a list of segment paths and returns the path at the specified index.
-    """
-    
+    """A ComfyUI node for selecting a specific timestamp from detected scenes."""
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
-            "optional": {
-                "segment_paths": ("LIST",),
-            },
             "required": {
+                "timestamps": ("LIST",),
                 "index": ("INT", {
                     "default": 0,
                     "min": 0,
@@ -528,65 +337,49 @@ class SelectVideo:
             },
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("selected_path",)
+    RETURN_TYPES = ("FLOAT", "FLOAT", "STRING")
+    RETURN_NAMES = ("start_time", "end_time", "timestamp_string")
     FUNCTION = "select_video"
     CATEGORY = "MiaoshouAI Video Segmentation"
 
-    def select_video(self, index, segment_paths=None):
-        """
-        Select a video segment path by index from the segment paths list.
-        
-        Args:
-            index: The index of the segment to select (0-based)
-            segment_paths: List of segment paths from TransNetV2_Run
-            
-        Returns:
-            The path string at the specified index
-        """
-        if segment_paths is None or len(segment_paths) == 0:
-            logger.warning("No segment paths provided")
-            return ("",)
-        
-        # Validate index
+    def select_video(self, timestamps, index):
+        if timestamps is None or len(timestamps) == 0:
+            raise ValueError("No timestamps provided")
+
         if index < 0:
-            logger.warning(f"Index {index} is negative, using 0")
-            index = 0
-        elif index >= len(segment_paths):
-            logger.warning(f"Index {index} is out of range (max: {len(segment_paths)-1}), using last index")
-            index = len(segment_paths) - 1
-        
-        selected_path = segment_paths[index]
-        logger.info(f"Selected segment {index}: {selected_path}")
-        
-        return (selected_path,)
+            raise IndexError(f"Index {index} is negative")
+        elif index >= len(timestamps):
+            raise IndexError(f"Index {index} is out of range (max: {len(timestamps)-1})")
+
+        start_time, end_time = timestamps[index]
+        timestamp_string = f"{start_time:.3f}-{end_time:.3f}"
+        logger.info(f"Selected scene {index}: {timestamp_string}")
+
+        return (start_time, end_time, timestamp_string)
 
 
 class ZipCompress:
     """
-    A ComfyUI node for compressing video segments into a zip file.
-    Takes a list of segment paths and creates a compressed zip archive.
+    A ComfyUI node for compressing files into a zip archive.
+    Note: This node is kept for backward compatibility but is less useful
+    since TransNetV2_Run now returns timestamps instead of video files.
     """
-    
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "optional": {
-                "images_or_video_path": ("STRING",),
+                "file_paths_string": ("STRING",),
             },
             "required": {
                 "filename_prefix": ("STRING", {
                     "default": "ComfyUI",
                     "multiline": False,
                 }),
-                "image_format": (
-                    ["PNG", "JPG", "WEBP", "MP4", "AVI", "MOV"],
-                    {"default": "PNG"},
-                ),
-                "password": ("STRING", {
+                "output_dir": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "placeholder": "Optional password for zip file"
+                    "placeholder": "Leave empty for temp directory"
                 }),
             },
         }
@@ -596,112 +389,50 @@ class ZipCompress:
     FUNCTION = "compress_files"
     CATEGORY = "MiaoshouAI Video Segmentation"
 
-    def compress_files(self, filename_prefix, image_format, password, images_or_video_path=None):
-        """
-        Compress video segments into a zip file.
-        
-        Args:
-            filename_prefix: Prefix for the zip filename
-            image_format: Format parameter (kept for interface compatibility)
-            password: Optional password for the zip file
-            images_or_video_path: String of file paths (newline-separated) to compress
-            
-        Returns:
-            The path to the created zip file
-        """
+    def compress_files(self, filename_prefix, output_dir, file_paths_string=None):
+        """Compress files into a zip archive."""
         import zipfile
         import datetime
-        
-        # Handle input - convert string to list if needed
-        if images_or_video_path is None or images_or_video_path.strip() == "":
-            logger.warning("No file paths provided for compression")
-            return ("",)
-        
-        # Convert path string to list (TransNetV2_Run outputs newline-separated paths)
-        if isinstance(images_or_video_path, str):
-            file_paths = [path.strip() for path in images_or_video_path.split('\n') if path.strip()]
-        else:
-            file_paths = images_or_video_path
-        
+
+        if file_paths_string is None or file_paths_string.strip() == "":
+            raise ValueError("No file paths provided for compression")
+
+        # Convert path string to list
+        file_paths = [path.strip() for path in file_paths_string.split('\n') if path.strip()]
+
         if not file_paths:
-            logger.warning("No valid file paths found")
-            return ("",)
-        
-        # Create output directory if not exists
-        # Use the directory of the first file as base for output
-        first_file_dir = os.path.dirname(file_paths[0])
-        
-        # Generate zip filename with timestamp
+            raise ValueError("No valid file paths found")
+
+        # Set output directory
+        if not output_dir:
+            output_dir = folder_paths.temp_directory
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Generate zip filename
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         zip_filename = f"{filename_prefix}_{timestamp}.zip"
-        zip_path = os.path.join(first_file_dir, zip_filename)
-        
-        try:
-            # Create zip file
-            compression = zipfile.ZIP_DEFLATED
-            compresslevel = 6  # Good balance between speed and compression
-            
-            with zipfile.ZipFile(zip_path, 'w', compression=compression, compresslevel=compresslevel) as zipf:
-                # Set password if provided
-                if password:
-                    zipf.setpassword(password.encode('utf-8'))
-                
-                # Add each file to the zip
-                for i, file_path in enumerate(file_paths):
-                    if os.path.exists(file_path):
-                        # Get just the filename for the archive
-                        filename = os.path.basename(file_path)
-                        
-                        # Add file to zip
-                        if password:
-                            # For password-protected files, we need to use a different approach
-                            zipf.write(file_path, filename)
-                        else:
-                            zipf.write(file_path, filename)
-                        
-                        logger.info(f"Added file {i+1}: {filename}")
-                    else:
-                        logger.warning(f"File not found, skipping: {file_path}")
-            
-            # Verify zip file was created
-            if os.path.exists(zip_path):
-                file_size = os.path.getsize(zip_path)
-                logger.info(f"✅ Successfully created zip file: {zip_path}")
-                logger.info(f"   File size: {file_size / (1024*1024):.2f} MB")
-                logger.info(f"   Contains {len(file_paths)} files")
-                if password:
-                    logger.info("   Password protected: Yes")
-                
-                return (os.path.abspath(zip_path),)
-            else:
-                logger.error("Failed to create zip file")
-                return ("",)
-                
-        except Exception as e:
-            logger.error(f"Error creating zip file: {str(e)}")
-            return ("",)
+        zip_path = os.path.join(output_dir, zip_filename)
+
+        # Create zip file
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zipf:
+            for file_path in file_paths:
+                if os.path.exists(file_path):
+                    filename = os.path.basename(file_path)
+                    zipf.write(file_path, filename)
+                    logger.info(f"Added to zip: {filename}")
+                else:
+                    raise FileNotFoundError(f"File not found: {file_path}")
+
+        if not os.path.exists(zip_path):
+            raise RuntimeError("Failed to create zip file")
+
+        file_size = os.path.getsize(zip_path)
+        logger.info(f"Created zip file: {zip_path} ({file_size / (1024*1024):.2f} MB)")
+
+        return (os.path.abspath(zip_path),)
 
 
-# Helper function similar to Qwen2.5-VL
-def temp_video(video):
-    """
-    Create temporary video file from VideoInput.
-    """
-    unique_id = uuid.uuid4().hex
-    video_path = (
-        Path(folder_paths.temp_directory) / f"temp_video_{unique_id}.mp4"
-    )
-    video_path.parent.mkdir(parents=True, exist_ok=True)
-    video.save_to(
-        str(video_path),
-        format="mp4",
-        codec="h264",
-    )
-
-    return str(video_path)
-
-
-# Node mappings for ComfyUI
+# Node mappings for ComfyUI - keeping original MiaoshouAI names
 NODE_CLASS_MAPPINGS = {
     "DownloadAndLoadTransNetModel": DownloadAndLoadTransNetModel,
     "TransNetV2_Run": TransNetV2_Run,

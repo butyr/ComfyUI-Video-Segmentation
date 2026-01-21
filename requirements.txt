@@ -1,10 +1,4 @@
 numpy>=1.19.0
 pillow>=8.0.0
-transnetv2-pytorch
-tensorflow>=2.1.0,<3.0.0
 opencv-python>=4.5.0
-ffmpeg-python>=0.2.0
-
-# TransNetV2 Model Weights
-# The model weights need to be downloaded separately from:
-# https://huggingface.co/MiaoshouAI/transnetv2-pytorch-weights
+huggingface_hub>=0.20.0
