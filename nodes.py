@@ -451,6 +451,11 @@ class SendToWebhook:
             "optional": {
                 "timestamps": ("LIST",),
                 "timestamps_string": ("STRING", {"forceInput": True}),
+                "job_id": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "placeholder": "Job/request ID for correlation"
+                }),
                 "custom_data": ("STRING", {
                     "default": "",
                     "multiline": True,
@@ -480,6 +485,7 @@ class SendToWebhook:
         webhook_url,
         timestamps=None,
         timestamps_string=None,
+        job_id="",
         custom_data="",
         headers="",
         timeout=30
@@ -493,6 +499,10 @@ class SendToWebhook:
 
         # Build payload
         payload = {}
+
+        # Add job_id if provided (for request correlation)
+        if job_id and job_id.strip():
+            payload["job_id"] = job_id.strip()
 
         # Add timestamps if provided
         if timestamps is not None:
